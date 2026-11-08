@@ -1,12 +1,100 @@
 /* ============================================================
    LinkHub — app logic
-   Renders everything from config.js. No edits needed here.
-   Click tracking is stored locally in the browser only
-   (localStorage key: "linkhub_clicks_v1") — nothing is sent
-   to any server.
+   Renders from config.js by default, but the live page comes from
+   the server: one profile document (key "profile") in KVdb (or the
+   self-hosted backend — see store.js / APP_CONFIG in config.js).
+
+   Profile document shape:
+     { ownerName, username, bio, tagline, location, avatarImage,
+       availableForWork, availableText,
+       socials: [{ label, handle, url, icon }],
+       links:   [{ label, title, subtitle, url, icon, badge }],
+       store:   [{ id, title, price, originalPrice, url, tag, emoji,
+                  description, includes, format }],
+       clicks:  { total, links: {}, socials: {}, products: {} },
+       pinHash, updatedAt }
+
+   - First visit: if no profile exists on the server, the defaults
+     from config.js are shown and NOTHING is seeded server-side
+     until the owner saves once in Edit mode.
+   - Edit mode: the first save sets an owner PIN — only its SHA-256
+     hash is stored (pinHash), never the PIN itself. Later edits
+     require the PIN; a wrong PIN cannot save (no PUT is sent).
+   - Click tracking: clicks update the stats strip immediately and
+     are also written to the server document (read-modify-write,
+     fire-and-forget; two visitors clicking at the same instant can
+     lose one increment — races are acceptable here).
+   - If the server cannot be reached, the page keeps working from
+     the config defaults and says so honestly in the status line.
+   © 2026 Mr. Abdul Rahman Dogar
    ============================================================ */
 (function () {
   "use strict";
+
+  /* ---------- Pure helpers (DOM-free; also exported for node tests) ---------- */
+  async function sha256Hex(str) {
+    var subtle = globalThis.crypto && globalThis.crypto.subtle;
+    if (!subtle) throw new Error("PIN hashing needs a secure context (https or localhost).");
+    var buf = await subtle.digest("SHA-256", new TextEncoder().encode(String(str)));
+    return Array.from(new Uint8Array(buf)).map(function (b) {
+      return b.toString(16).padStart(2, "0");
+    }).join("");
+  }
+  async function verifyPin(pin, hash) {
+    if (!hash) return false;
+    try { return (await sha256Hex(pin)) === hash; } catch (e) { return false; }
+  }
+  function profileFromConfig(cfg) {
+    var p = cfg.profile || {};
+    return {
+      ownerName: p.name || "",
+      username: p.username || "",
+      bio: p.bio || "",
+      tagline: p.tagline || "",
+      location: p.location || "",
+      avatarImage: p.avatarImage || "",
+      availableForWork: !!p.availableForWork,
+      availableText: p.availableText || "",
+      socials: (cfg.socials || []).map(function (s) {
+        return { label: s.label, handle: s.handle || "", url: s.url, icon: s.icon || "globe" };
+      }),
+      links: (cfg.links || []).map(function (l) {
+        return { label: l.title, title: l.title, subtitle: l.subtitle || "", url: l.url, icon: l.icon || "globe", badge: l.badge || "" };
+      }),
+      store: ((cfg.store && cfg.store.products) || []).map(function (pr) {
+        return { id: pr.id, title: pr.name, price: pr.price, originalPrice: pr.originalPrice || 0, url: "", tag: pr.tag || "", emoji: pr.emoji || "", description: pr.description || "", includes: pr.includes || [], format: pr.format || "" };
+      }),
+      clicks: { total: 0, links: {}, socials: {}, products: {} },
+      pinHash: "",
+      updatedAt: ""
+    };
+  }
+  function applyClickToProfile(doc, kind, id) {
+    doc.clicks = doc.clicks || { total: 0, links: {}, socials: {}, products: {} };
+    doc.clicks.total = (doc.clicks.total || 0) + 1;
+    doc.clicks[kind] = doc.clicks[kind] || {};
+    doc.clicks[kind][id] = (doc.clicks[kind][id] || 0) + 1;
+    return doc;
+  }
+  // "Label | handle | url" lines -> [[...parts]] (empty lines skipped).
+  function parsePipeLines(text) {
+    return String(text || "").split(/\r?\n/).map(function (line) {
+      return line.split("|").map(function (part) { return part.trim(); });
+    }).filter(function (parts) { return parts.some(function (part) { return part !== ""; }); });
+  }
+
+  /* Node test entry-point: export the pure helpers and stop before
+     any DOM work (there is no document in node). */
+  if (typeof module !== "undefined" && module.exports) {
+    module.exports = {
+      sha256Hex: sha256Hex,
+      verifyPin: verifyPin,
+      profileFromConfig: profileFromConfig,
+      applyClickToProfile: applyClickToProfile,
+      parsePipeLines: parsePipeLines
+    };
+    return;
+  }
 
   var config = window.LINKHUB_CONFIG;
   if (!config) {
@@ -16,6 +104,10 @@
       "</p>";
     return;
   }
+
+  var store = window.KVStore;
+  if (store && window.APP_CONFIG) store.configure(window.APP_CONFIG);
+  var PROFILE_KEY = "profile";
 
   /* ---------- Icons (inline SVG, no external requests) ---------- */
   var ICONS = {
@@ -39,109 +131,279 @@
     });
   }
   function money(n) { return "$" + Number(n).toFixed(2).replace(/\.00$/, ""); }
+  function $(id) { return document.getElementById(id); }
+  function iconForLabel(label) {
+    var l = String(label || "").toLowerCase();
+    if (l.indexOf("github") !== -1) return "github";
+    if (l.indexOf("twitter") !== -1 || l === "x" || l.indexOf(" x ") !== -1) return "x";
+    if (l.indexOf("instagram") !== -1) return "instagram";
+    if (l.indexOf("linkedin") !== -1) return "linkedin";
+    if (l.indexOf("youtube") !== -1) return "youtube";
+    if (l.indexOf("telegram") !== -1) return "telegram";
+    if (l.indexOf("mail") !== -1 || l.indexOf("email") !== -1) return "mail";
+    return "globe";
+  }
 
-  /* ---------- Click tracking (localStorage only) ---------- */
-  var STORE_KEY = "linkhub_clicks_v1";
-  var clicks = { total: 0, links: {}, products: {} };
+  /* ---------- State ---------- */
+  var defaults = profileFromConfig(config);
+  var current = JSON.parse(JSON.stringify(defaults)); // what is on screen
+  var serverProfile = null;   // the document on the server, if any
+  var unlocked = false;       // PIN verified this session only (never stored)
+
+  /* Local click counts: fallback while no server profile exists, so the
+     stats strip still works offline / before the first save. */
+  var LOCAL_KEY = "linkhub_clicks_v1";
+  var localClicks = { total: 0, links: {}, socials: {}, products: {} };
   try {
-    var saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
-    if (saved && typeof saved.total === "number") clicks = saved;
+    var savedLocal = JSON.parse(localStorage.getItem(LOCAL_KEY) || "null");
+    if (savedLocal && typeof savedLocal.total === "number") localClicks = savedLocal;
   } catch (e) { /* corrupted storage: start fresh */ }
-
-  function saveClicks() {
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(clicks)); } catch (e) { /* storage full/blocked */ }
+  function saveLocalClicks() {
+    try { localStorage.setItem(LOCAL_KEY, JSON.stringify(localClicks)); } catch (e) { /* storage full/blocked */ }
   }
-  function track(kind, id) {
-    clicks.total += 1;
-    clicks[kind] = clicks[kind] || {};
-    clicks[kind][id] = (clicks[kind][id] || 0) + 1;
-    saveClicks();
-    renderStats();
+  function effectiveClicks() {
+    return (serverProfile && serverProfile.clicks) ? serverProfile.clicks : localClicks;
   }
 
-  /* ---------- Render: profile ---------- */
-  var p = config.profile;
-  document.getElementById("avatar").innerHTML = p.avatarImage
-    ? '<img src="' + esc(p.avatarImage) + '" alt="' + esc(p.name) + '">'
-    : esc(p.initials || p.name.split(" ").map(function (w) { return w[0]; }).join("").slice(0, 2).toUpperCase());
-  document.getElementById("profile-name").textContent = p.name;
-  document.getElementById("profile-username").textContent = p.username || "";
-  document.getElementById("profile-bio").textContent = p.bio;
-  document.getElementById("profile-tagline").textContent = p.tagline || "";
-  document.getElementById("profile-location").textContent = p.location ? "📍 " + p.location : "";
-  var avail = document.getElementById("availability");
-  if (p.availableForWork) {
-    avail.style.display = "inline-flex";
-    avail.querySelector("span:last-child").textContent = p.availableText || "Available for work";
-  } else {
-    avail.style.display = "none";
+  /* ---------- Status line ---------- */
+  function setStatus(msg) {
+    var el = $("server-status");
+    if (el) el.textContent = msg;
   }
-  document.title = p.name + " — Links & Digital Store";
 
-  /* ---------- Render: socials ---------- */
-  document.getElementById("socials").innerHTML = config.socials.map(function (s) {
-    return '<a class="social-btn" href="' + esc(s.url) + '" target="_blank" rel="noopener noreferrer" ' +
-      'aria-label="' + esc(s.label) + " — " + esc(s.handle || s.url) + '" title="' + esc(s.label) + '" ' +
-      'data-track="social" data-id="' + esc(s.label) + '">' + icon(s.icon) + "</a>";
-  }).join("");
-
-  /* ---------- Render: featured links ---------- */
-  document.getElementById("links").innerHTML = config.links.map(function (l) {
-    var badge = l.badge ? '<span class="link-badge">' + esc(l.badge) + "</span>" : "";
-    var external = /^https?:/.test(l.url);
-    return '<a class="link-card" href="' + esc(l.url) + '"' +
-      (external ? ' target="_blank" rel="noopener noreferrer"' : "") +
-      ' data-track="link" data-id="' + esc(l.title) + '">' +
-      '<span class="link-icon">' + icon(l.icon) + "</span>" +
-      '<span class="link-text"><strong>' + esc(l.title) + "</strong>" +
-      (l.subtitle ? "<small>" + esc(l.subtitle) + "</small>" : "") + "</span>" +
-      badge + '<span class="link-arrow" aria-hidden="true">›</span></a>';
-  }).join("");
-
-  /* ---------- Render: store ---------- */
-  document.getElementById("store-heading").textContent = config.store.heading;
-  document.getElementById("store-subheading").textContent = config.store.subheading;
-  document.getElementById("secure-note").textContent =
-    "🔒 " + config.store.checkoutNote;
-  document.getElementById("products").innerHTML = config.store.products.map(function (prod) {
-    var was = prod.originalPrice && prod.originalPrice > prod.price
-      ? "<s>" + money(prod.originalPrice) + "</s>" : "";
-    var tag = prod.tag ? '<span class="product-tag">' + esc(prod.tag) + "</span>" : "";
-    var includes = (prod.includes || []).map(function (item) {
-      return "<li>" + esc(item) + "</li>";
+  /* ---------- Render ---------- */
+  function renderProfile(doc) {
+    var p = config.profile;
+    var name = doc.ownerName || p.name;
+    $("avatar").innerHTML = doc.avatarImage
+      ? '<img src="' + esc(doc.avatarImage) + '" alt="' + esc(name) + '">'
+      : esc((name || "").split(" ").map(function (w) { return w[0]; }).join("").slice(0, 2).toUpperCase() || "AD");
+    $("profile-name").textContent = name;
+    $("profile-username").textContent = doc.username || p.username || "";
+    $("profile-bio").textContent = doc.bio || p.bio;
+    $("profile-tagline").textContent = doc.tagline || p.tagline || "";
+    $("profile-location").textContent = doc.location ? "📍 " + doc.location : (p.location ? "📍 " + p.location : "");
+    var avail = $("availability");
+    var showAvail = doc.availableForWork !== undefined ? doc.availableForWork : p.availableForWork;
+    if (showAvail) {
+      avail.style.display = "inline-flex";
+      avail.querySelector("span:last-child").textContent = doc.availableText || p.availableText || "Available for work";
+    } else {
+      avail.style.display = "none";
+    }
+    document.title = name + " — Links & Digital Store";
+  }
+  function renderSocials(doc) {
+    $("socials").innerHTML = (doc.socials || []).map(function (s) {
+      return '<a class="social-btn" href="' + esc(s.url) + '" target="_blank" rel="noopener noreferrer" ' +
+        'aria-label="' + esc(s.label) + " — " + esc(s.handle || s.url) + '" title="' + esc(s.label) + '" ' +
+        'data-track="social" data-id="' + esc(s.label) + '">' + icon(s.icon) + "</a>";
     }).join("");
-    return '<article class="product">' +
-      '<div class="product-top"><span class="product-emoji" aria-hidden="true">' + esc(prod.emoji || "📦") + "</span>" + tag + "</div>" +
-      "<h3>" + esc(prod.name) + "</h3>" +
-      '<p class="desc">' + esc(prod.description) + "</p>" +
-      "<ul>" + includes + "</ul>" +
-      '<p class="product-format">' + esc(prod.format || "") + "</p>" +
-      '<div class="product-buy"><span class="price">' + money(prod.price) + was + "</span>" +
-      '<button class="btn" type="button" data-buy="' + esc(prod.id) + '">Buy now</button></div>' +
-      "</article>";
-  }).join("");
-
-  /* ---------- Render: footer ---------- */
-  document.getElementById("footer").innerHTML =
-    "© " + esc(config.footer.year) + " " + esc(config.footer.copyrightName) +
-    " · " + esc(config.footer.text) +
-    ' · <a href="https://github.com/abdulrahman-dogar-web" target="_blank" rel="noopener noreferrer">GitHub</a>';
-
-  /* ---------- Stats strip ---------- */
+  }
+  function renderLinks(doc) {
+    $("links").innerHTML = (doc.links || []).map(function (l) {
+      var badge = l.badge ? '<span class="link-badge">' + esc(l.badge) + "</span>" : "";
+      var external = /^https?:/.test(l.url);
+      return '<a class="link-card" href="' + esc(l.url) + '"' +
+        (external ? ' target="_blank" rel="noopener noreferrer"' : "") +
+        ' data-track="link" data-id="' + esc(l.label || l.title) + '">' +
+        '<span class="link-icon">' + icon(l.icon) + "</span>" +
+        '<span class="link-text"><strong>' + esc(l.label || l.title) + "</strong>" +
+        (l.subtitle ? "<small>" + esc(l.subtitle) + "</small>" : "") + "</span>" +
+        badge + '<span class="link-arrow" aria-hidden="true">›</span></a>';
+    }).join("");
+  }
+  function renderStore(doc) {
+    $("store-heading").textContent = config.store.heading;
+    $("store-subheading").textContent = config.store.subheading;
+    $("secure-note").textContent = "🔒 " + config.store.checkoutNote;
+    $("products").innerHTML = (doc.store || []).map(function (prod) {
+      var was = prod.originalPrice && prod.originalPrice > prod.price
+        ? "<s>" + money(prod.originalPrice) + "</s>" : "";
+      var tag = prod.tag ? '<span class="product-tag">' + esc(prod.tag) + "</span>" : "";
+      var includes = (prod.includes || []).map(function (item) {
+        return "<li>" + esc(item) + "</li>";
+      }).join("");
+      return '<article class="product">' +
+        '<div class="product-top"><span class="product-emoji" aria-hidden="true">' + esc(prod.emoji || "📦") + "</span>" + tag + "</div>" +
+        "<h3>" + esc(prod.title) + "</h3>" +
+        '<p class="desc">' + esc(prod.description) + "</p>" +
+        "<ul>" + includes + "</ul>" +
+        '<p class="product-format">' + esc(prod.format || "") + "</p>" +
+        '<div class="product-buy"><span class="price">' + money(prod.price) + was + "</span>" +
+        '<button class="btn" type="button" data-buy="' + esc(prod.id) + '">Buy now</button></div>' +
+        "</article>";
+    }).join("");
+  }
+  function renderFooter() {
+    $("footer").innerHTML =
+      "© " + esc(config.footer.year) + " " + esc(config.footer.copyrightName) +
+      " · " + esc(config.footer.text) +
+      ' · <a href="https://github.com/abdulrahman-dogar-web" target="_blank" rel="noopener noreferrer">GitHub</a>';
+  }
   function renderStats() {
-    var totalEl = document.getElementById("stat-total");
-    var linkEl = document.getElementById("stat-links");
-    var storeEl = document.getElementById("stat-store");
-    if (totalEl) totalEl.textContent = clicks.total;
+    var clicks = effectiveClicks();
+    var totalEl = $("stat-total"), linkEl = $("stat-links"), storeEl = $("stat-store");
+    if (totalEl) totalEl.textContent = clicks.total || 0;
     if (linkEl) {
-      linkEl.textContent = Object.keys(clicks.links || {}).reduce(function (a, k) { return a + clicks.links[k]; }, 0) +
+      linkEl.textContent =
+        Object.keys(clicks.links || {}).reduce(function (a, k) { return a + clicks.links[k]; }, 0) +
         Object.keys(clicks.socials || {}).reduce(function (a, k) { return a + clicks.socials[k]; }, 0);
     }
     if (storeEl) {
       storeEl.textContent = Object.keys(clicks.products || {}).reduce(function (a, k) { return a + clicks.products[k]; }, 0);
     }
   }
-  renderStats();
+  function renderAll() {
+    renderProfile(current);
+    renderSocials(current);
+    renderLinks(current);
+    renderStore(current);
+    renderFooter();
+    renderStats();
+  }
+
+  /* ---------- Load from the server ---------- */
+  async function init() {
+    renderAll();
+    if (!store) { setStatus("Server store not loaded — showing defaults from this page."); return; }
+    setStatus("Connecting to server…");
+    var remote = await store.get(PROFILE_KEY);
+    if (remote && remote.ownerName) {
+      serverProfile = remote;
+      current = remote;
+      renderAll();
+      setStatus("Loaded from server ✓" + (remote.updatedAt ? " · updated " + new Date(remote.updatedAt).toLocaleString() : "") + " · clicks are counted on the server.");
+    } else {
+      setStatus("Showing defaults — not saved to the server yet. Open ✏️ Edit page and save once to publish them.");
+    }
+  }
+
+  /* ---------- Click tracking (local + server) ---------- */
+  function track(kind, id) {
+    applyClickToProfile(localClicks, kind, id);
+    saveLocalClicks();
+    if (serverProfile) applyClickToProfile(serverProfile, kind, id);
+    renderStats();
+    // Fire-and-forget server increment (read-modify-write; if two
+    // visitors click at the same instant one increment can be lost).
+    if (serverProfile && store) {
+      store.get(PROFILE_KEY).then(function (latest) {
+        if (!latest) return null;
+        applyClickToProfile(latest, kind, id);
+        return store.put(PROFILE_KEY, latest);
+      }).then(function (ok) {
+        if (ok === false) setStatus("Saved to server ✓ · click count could not be updated just now.");
+      }).catch(function () { /* offline: local count already shown */ });
+    }
+  }
+
+  /* ---------- Edit mode + owner PIN ---------- */
+  var editBackdrop = $("edit-backdrop");
+  function openEdit() {
+    $("edit-name").value = current.ownerName || "";
+    $("edit-bio").value = current.bio || "";
+    $("edit-tagline").value = current.tagline || "";
+    $("edit-location").value = current.location || "";
+    $("edit-socials").value = (current.socials || []).map(function (s) {
+      return [s.label, s.handle || "", s.url].join(" | ");
+    }).join("\n");
+    $("edit-links").value = (current.links || []).map(function (l) {
+      return [l.label || l.title, l.subtitle || "", l.url].join(" | ");
+    }).join("\n");
+    $("edit-store").value = (current.store || []).map(function (pr) {
+      return [pr.title, pr.price, pr.url || ""].join(" | ");
+    }).join("\n");
+    var hasPin = !!current.pinHash;
+    $("edit-pin-row").style.display = (hasPin && !unlocked) ? "" : "none";
+    $("edit-newpin-row").style.display = (!hasPin) ? "" : "none";
+    $("edit-pin").value = "";
+    $("edit-pin-new").value = "";
+    $("edit-pin-confirm").value = "";
+    setEditError("");
+    editBackdrop.classList.add("open");
+    editBackdrop.setAttribute("aria-hidden", "false");
+    (hasPin && !unlocked ? $("edit-pin") : $("edit-name")).focus();
+  }
+  function closeEdit() {
+    editBackdrop.classList.remove("open");
+    editBackdrop.setAttribute("aria-hidden", "true");
+  }
+  function setEditError(msg) {
+    var el = $("edit-error");
+    if (el) el.textContent = msg || "";
+  }
+  function docFromForm() {
+    var doc = JSON.parse(JSON.stringify(current));
+    doc.ownerName = $("edit-name").value.trim();
+    doc.bio = $("edit-bio").value.trim();
+    doc.tagline = $("edit-tagline").value.trim();
+    doc.location = $("edit-location").value.trim();
+    doc.socials = parsePipeLines($("edit-socials").value).map(function (parts) {
+      var prev = (current.socials || []).find(function (s) { return s.label === parts[0]; });
+      return { label: parts[0] || "", handle: parts[1] || "", url: parts[2] || "", icon: prev ? prev.icon : iconForLabel(parts[0]) };
+    });
+    doc.links = parsePipeLines($("edit-links").value).map(function (parts) {
+      var prev = (current.links || []).find(function (l) { return (l.label || l.title) === parts[0]; });
+      return {
+        label: parts[0] || "", title: parts[0] || "", subtitle: parts[1] || "", url: parts[2] || "",
+        icon: prev ? prev.icon : "globe", badge: prev ? prev.badge : ""
+      };
+    });
+    doc.store = parsePipeLines($("edit-store").value).map(function (parts) {
+      var prev = (current.store || []).find(function (pr) { return pr.title === parts[0]; }) || {};
+      return {
+        id: prev.id || ("product-" + parts[0].toLowerCase().replace(/[^a-z0-9]+/g, "-")),
+        title: parts[0] || "", price: Number(parts[1]) || prev.price || 0,
+        originalPrice: prev.originalPrice || 0, url: parts[2] || prev.url || "",
+        tag: prev.tag || "", emoji: prev.emoji || "📦",
+        description: prev.description || "", includes: prev.includes || [], format: prev.format || ""
+      };
+    });
+    return doc;
+  }
+  async function saveEdit() {
+    setEditError("");
+    if (!store) { setEditError("Server store not loaded — cannot save."); return; }
+    var doc = docFromForm();
+    if (!doc.ownerName) { setEditError("Please enter a name."); return; }
+    try {
+      if (current.pinHash) {
+        if (!unlocked) {
+          var pin = $("edit-pin").value;
+          if (!pin) { setEditError("Enter the owner PIN to save changes."); return; }
+          if (!(await verifyPin(pin, current.pinHash))) {
+            setEditError("Wrong PIN — changes were not saved.");
+            return; // no PUT is sent on a wrong PIN
+          }
+          unlocked = true;
+        }
+        doc.pinHash = current.pinHash;
+      } else {
+        var newPin = $("edit-pin-new").value;
+        var confirmPin = $("edit-pin-confirm").value;
+        if (!newPin || newPin.length < 4) { setEditError("Choose an owner PIN of at least 4 characters. Keep it safe — it is the only way to edit this page."); return; }
+        if (newPin !== confirmPin) { setEditError("The two PINs do not match."); return; }
+        doc.pinHash = await sha256Hex(newPin);
+      }
+    } catch (e) {
+      setEditError("Could not check the PIN: " + e.message);
+      return;
+    }
+    doc.updatedAt = new Date().toISOString();
+    var ok = await store.put(PROFILE_KEY, doc);
+    if (ok) {
+      serverProfile = doc;
+      current = doc;
+      renderAll();
+      setStatus("Saved to server ✓ · updated " + new Date(doc.updatedAt).toLocaleString());
+      showToast("Saved to server ✓");
+      closeEdit();
+    } else {
+      setStatus("Couldn't reach the server — changes were NOT saved.");
+      setEditError("Couldn't reach the server — changes were NOT saved. Check your connection and try again.");
+    }
+  }
 
   /* ---------- Click tracking: delegate on the whole page ---------- */
   document.addEventListener("click", function (e) {
@@ -154,39 +416,47 @@
     var buyBtn = e.target.closest("[data-buy]");
     if (buyBtn) {
       var id = buyBtn.getAttribute("data-buy");
-      var prod = config.store.products.find(function (x) { return x.id === id; });
-      if (prod) { track("products", prod.name); openCheckout(prod); }
+      var prod = current.store.find(function (x) { return x.id === id; })
+        || config.store.products.find(function (x) { return x.id === id; });
+      if (prod) { track("products", prod.title || prod.name); openCheckout(prod); }
     }
   });
 
   /* ---------- Demo checkout modal ---------- */
-  var backdrop = document.getElementById("modal-backdrop");
-  var modalProduct = document.getElementById("modal-product");
-  var modalPrice = document.getElementById("modal-price");
-  var modalNote = document.getElementById("modal-note");
-  var toast = document.getElementById("toast");
+  var backdrop = $("modal-backdrop");
+  var modalProduct = $("modal-product");
+  var modalPrice = $("modal-price");
+  var modalNote = $("modal-note");
+  var toast = $("toast");
   var toastTimer = null;
 
   function openCheckout(prod) {
-    modalProduct.textContent = prod.name + " — " + (prod.format || "Instant download");
+    var name = prod.title || prod.name;
+    modalProduct.textContent = name + " — " + (prod.format || "Instant download");
     modalPrice.textContent = money(prod.price) + " " + (config.store.currency || "USD");
     modalNote.innerHTML = "<strong>Demo checkout.</strong> " + esc(config.store.checkoutNote) +
       "<br><br>No card details are asked for, no payment is taken, and no order is placed.";
     backdrop.classList.add("open");
     backdrop.setAttribute("aria-hidden", "false");
-    document.getElementById("modal-close").focus();
+    $("modal-close").focus();
   }
   function closeCheckout() {
     backdrop.classList.remove("open");
     backdrop.setAttribute("aria-hidden", "true");
   }
-  document.getElementById("modal-close").addEventListener("click", closeCheckout);
-  document.getElementById("modal-gotit").addEventListener("click", function () {
+  $("modal-close").addEventListener("click", closeCheckout);
+  $("modal-gotit").addEventListener("click", function () {
     closeCheckout();
     showToast("Demo only — no order was placed.");
   });
   backdrop.addEventListener("click", function (e) { if (e.target === backdrop) closeCheckout(); });
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeCheckout(); });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") { closeCheckout(); closeEdit(); } });
+
+  /* ---------- Edit modal wiring ---------- */
+  $("editBtn").addEventListener("click", openEdit);
+  $("edit-cancel").addEventListener("click", closeEdit);
+  $("edit-save").addEventListener("click", saveEdit);
+  editBackdrop.addEventListener("click", function (e) { if (e.target === editBackdrop) closeEdit(); });
 
   function showToast(msg) {
     toast.textContent = msg;
@@ -194,4 +464,6 @@
     clearTimeout(toastTimer);
     toastTimer = setTimeout(function () { toast.classList.remove("show"); }, 3200);
   }
+
+  init();
 })();

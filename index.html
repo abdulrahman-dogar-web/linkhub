@@ -23,12 +23,16 @@
       <p class="location" id="profile-location"></p>
     </header>
 
-    <!-- Click stats (localStorage only — see README) -->
+    <!-- Click stats (server counts when a profile is saved, local otherwise) -->
     <section class="stats" aria-label="Link statistics">
       <div class="stat"><strong id="stat-total">0</strong><span>Total clicks</span></div>
       <div class="stat"><strong id="stat-links">0</strong><span>Link clicks</span></div>
       <div class="stat"><strong id="stat-store">0</strong><span>Store clicks</span></div>
-      <p class="stat-note">Counted in this browser only — nothing is sent to a server.</p>
+      <p class="stat-note">Clicks are counted on the server — the same total on every device.</p>
+      <div class="owner-row">
+        <p class="stat-note server-status" id="server-status">Connecting to server…</p>
+        <button class="btn btn-ghost" type="button" id="editBtn">✏️ Edit page</button>
+      </div>
     </section>
 
     <!-- Socials (rendered from config.js) -->
@@ -66,6 +70,46 @@
     </div>
   </div>
 
+  <!-- Edit page modal (owner only — PIN protected, see README) -->
+  <div class="modal-backdrop" id="edit-backdrop" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="edit-title">
+    <div class="modal edit-modal">
+      <h2 id="edit-title">Edit page</h2>
+      <p class="modal-product">Changes are saved to the server, so they show up on every device. Only the owner (with the PIN) can save.</p>
+      <div class="edit-form">
+        <label for="edit-name">Name</label>
+        <input type="text" id="edit-name" maxlength="80" autocomplete="off">
+        <label for="edit-bio">Bio</label>
+        <textarea id="edit-bio" rows="2" maxlength="300"></textarea>
+        <label for="edit-tagline">Tagline</label>
+        <input type="text" id="edit-tagline" maxlength="140" autocomplete="off">
+        <label for="edit-location">Location</label>
+        <input type="text" id="edit-location" maxlength="80" autocomplete="off">
+        <label for="edit-socials">Social links — one per line: Label | handle | URL</label>
+        <textarea id="edit-socials" rows="6" spellcheck="false"></textarea>
+        <label for="edit-links">Featured links — one per line: Title | subtitle | URL</label>
+        <textarea id="edit-links" rows="4" spellcheck="false"></textarea>
+        <label for="edit-store">Store products — one per line: Title | price | URL (optional)</label>
+        <textarea id="edit-store" rows="4" spellcheck="false"></textarea>
+        <div id="edit-pin-row">
+          <label for="edit-pin">Owner PIN</label>
+          <input type="password" id="edit-pin" inputmode="numeric" autocomplete="off" placeholder="Enter the PIN you set">
+        </div>
+        <div id="edit-newpin-row">
+          <label for="edit-pin-new">Set an owner PIN (at least 4 characters)</label>
+          <input type="password" id="edit-pin-new" inputmode="numeric" autocomplete="off" placeholder="Choose a PIN — keep it safe">
+          <label for="edit-pin-confirm">Confirm PIN</label>
+          <input type="password" id="edit-pin-confirm" inputmode="numeric" autocomplete="off" placeholder="Repeat the PIN">
+          <p class="edit-hint">Only the PIN's SHA-256 hash is stored on the server — never the PIN itself. If you forget the PIN, the page cannot be edited from the browser.</p>
+        </div>
+        <p class="edit-error" id="edit-error" role="alert"></p>
+      </div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" type="button" id="edit-cancel">Cancel</button>
+        <button class="btn" type="button" id="edit-save">Save to server</button>
+      </div>
+    </div>
+  </div>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <noscript>
@@ -75,6 +119,7 @@
   </noscript>
 
   <script src="config.js"></script>
+  <script src="store.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

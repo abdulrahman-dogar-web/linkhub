@@ -2,7 +2,7 @@
 
 A premium link-in-bio page with a mini digital store — for **Abdul Rahman Dogar**.
 
-One page, zero build step, zero backend. Open `index.html` and it works.
+One page, zero build step. The live content (profile, links, store, clicks) is stored in KVdb so edits show up on every device — see "Editing the live page" below.
 
 ![Dark theme](https://img.shields.io/badge/theme-dark%20premium-7c5cff)
 ![Stack](https://img.shields.io/badge/stack-HTML%20%2B%20CSS%20%2B%20vanilla%20JS-00d4a6)
@@ -19,8 +19,21 @@ One page, zero build step, zero backend. Open `index.html` and it works.
   3. Minimal Icon Pack — 500 Icons — $12 (was $24)
   4. Digital Product Launch Checklist — $9
 - **Demo checkout** — the Buy button opens a modal that clearly states **no payment is taken and no order is placed**. No fake payment processing, no fake order numbers, no card fields. Connect a real provider (Gumroad, Lemon Squeezy or Stripe) to sell for real.
-- **Click tracking** — total, link and store clicks are counted in `localStorage` (`linkhub_clicks_v1`) and shown in the stats strip. Counted in the visitor's browser only; nothing is sent to any server.
+- **Click tracking** — total, link and store clicks are counted in the stats strip and stored on the server (in the profile document), so the same total shows on every device. Clicks are also kept in the visitor's browser (`localStorage`, `linkhub_clicks_v1`) as a fallback while no profile has been saved yet. Two visitors clicking at the exact same instant can lose one increment (read-modify-write) — acceptable for a stats counter.
+- **Server-backed profile** — the live page (name, bio, socials, links, store, clicks) is one document (`profile`) in KVdb, loaded on every visit. If the server can't be reached, the page falls back to the defaults in `config.js` and says so in the status line under the stats.
 - **Premium dark design** — mobile-first, responsive (products go 2-up on wider screens), accessible (keyboard-focusable cards, `aria-label`s, Escape closes the modal, reduced-motion support), and fully self-contained — no external fonts, images or CDN requests.
+
+## Editing the live page (owner PIN)
+
+The page visitors see comes from the server, not from `config.js` — so an edit on your phone shows up on every device. Click **✏️ Edit page** under the stats strip.
+
+- **First save sets your owner PIN.** Enter a PIN of at least 4 characters (twice). Only the PIN's **SHA-256 hash** is stored in the profile document (`pinHash`) — the PIN itself is never stored or sent anywhere except to hash it in your browser. Keep it safe: if you forget it, the page can't be edited from the browser.
+- **Later edits need the PIN.** Enter it in the edit form; a wrong PIN shows an error and **nothing is saved** (no request is sent).
+- **What you can edit:** name, bio, tagline, location, social links (one per line: `Label | handle | URL`), featured links (`Title | subtitle | URL`) and store products (`Title | price | URL`). Product details that aren't in the form (description, "what's included", emoji, sale price) are kept from the existing product.
+- **Status line:** under the stats strip the page honestly reports `Saved to server ✓`, `Loaded from server ✓`, or `Couldn't reach the server` — if the server can't be reached, edits are not saved and the page keeps showing the last good version.
+- **First visit seeds nothing:** until the owner saves once, visitors see the defaults from `config.js` and no profile document is created on the server.
+
+`config.js` is still the source of the defaults (and of the store heading, checkout note and footer). The server store is configured in `config.js` as `APP_CONFIG = { bucket, prefix: "lh:", apiBase: "" }`. When `apiBase` is empty the page talks to KVdb directly; set it to the self-hosted backend URL later and the same code talks to that instead — no other change needed.
 
 ## How to run / demo
 
@@ -45,7 +58,7 @@ Then:
 
 ## How to customise
 
-**Edit only `config.js`.** Everything on the page is rendered from it — you never need to touch `index.html`, `styles.css` or `app.js`.
+**Edit `config.js` for the defaults** (what visitors see before the owner saves once, and the store heading/checkout wording). **Use ✏️ Edit page in the browser to change the live page** — that writes to the server.
 
 | What | Where in `config.js` |
 |---|---|
@@ -72,8 +85,11 @@ Replace the demo modal in `app.js` (`openCheckout`) with a link to your product 
 linkhub/
 ├── index.html    # Page shell — all content is rendered by app.js
 ├── styles.css    # Premium dark theme, mobile-first, responsive
-├── config.js     # ← Edit this file to customise everything
-├── app.js        # Rendering, click tracking (localStorage), demo checkout modal
+├── config.js     # ← Defaults + server store config (APP_CONFIG)
+├── store.js      # KVStore: PUT/GET/DELETE against KVdb or apiBase
+├── app.js        # Rendering, server profile load, PIN edit mode, click tracking, demo checkout modal
+├── test-store.js # Node tests against a local mock KVdb server (see TEST-LOG.md)
+├── TEST-LOG.md   # Test results
 ├── README.md     # This file
 ├── LICENSE       # MIT
 └── .gitignore
@@ -81,7 +97,7 @@ linkhub/
 
 ## Privacy
 
-Click counts live only in the visitor's own browser (`localStorage`). LinkHub makes no network requests, sets no cookies and sends no analytics anywhere.
+Click counts are stored on the server (in the public profile document) so the total is the same on every device — that is the point of the page. No visitor is identified: no cookies, no analytics, no personal data is collected. The owner PIN is never stored — only its SHA-256 hash, inside the profile document. The bucket id in `config.js` is a random identifier, not a secret.
 
 ## License
 

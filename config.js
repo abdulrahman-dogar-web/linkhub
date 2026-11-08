@@ -138,3 +138,14 @@ const LINKHUB_CONFIG = {
 
 // Expose for app.js (and for anyone inspecting in the console).
 window.LINKHUB_CONFIG = LINKHUB_CONFIG;
+
+/* ---------- Server store (live backend) ----------
+   The page loads its profile from the live backend at apiBase
+   (Vercel + Vercel Blob, durable storage), so edits made on one
+   device show up on every device. Set apiBase to "" to fall back
+   to KVdb directly. The bucket id is a random identifier, not a secret. */
+window.APP_CONFIG = {
+  bucket: "E1Ca9VeHqAZoPyRb54aTTv",
+  prefix: "lh:",
+  apiBase: "https://apps-backend-tahqeeq.vercel.app"
+};

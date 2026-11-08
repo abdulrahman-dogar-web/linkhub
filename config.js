@@ -147,5 +147,5 @@ window.LINKHUB_CONFIG = LINKHUB_CONFIG;
 window.APP_CONFIG = {
   bucket: "E1Ca9VeHqAZoPyRb54aTTv",
   prefix: "lh:",
-  apiBase: "https://apps-backend-tahqeeq.vercel.app"
+  apiBase: "https://apps-backend.abdulrahman-dogar.workers.dev"
 };

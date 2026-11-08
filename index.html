@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Abdul Rahman Dogar — links, templates and digital products. Builder, trader & digital creator.">
+  <meta name="theme-color" content="#0a0a0f">
+  <title>Abdul Rahman Dogar — Links &amp; Digital Store</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%237c5cff'/%3E%3Ctext x='32' y='42' font-family='Arial,sans-serif' font-size='28' font-weight='bold' fill='white' text-anchor='middle'%3EAD%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+  <main class="container">
+
+    <!-- Profile (rendered from config.js) -->
+    <header class="profile">
+      <div class="avatar" id="avatar" aria-hidden="true">AD</div>
+      <p class="availability" id="availability"><span class="dot" aria-hidden="true"></span><span>Available for collaborations</span></p>
+      <h1 id="profile-name">Abdul Rahman Dogar</h1>
+      <p class="username" id="profile-username">@abdulrahman_dogar</p>
+      <p class="bio" id="profile-bio"></p>
+      <p class="tagline" id="profile-tagline"></p>
+      <p class="location" id="profile-location"></p>
+    </header>
+
+    <!-- Click stats (localStorage only — see README) -->
+    <section class="stats" aria-label="Link statistics">
+      <div class="stat"><strong id="stat-total">0</strong><span>Total clicks</span></div>
+      <div class="stat"><strong id="stat-links">0</strong><span>Link clicks</span></div>
+      <div class="stat"><strong id="stat-store">0</strong><span>Store clicks</span></div>
+      <p class="stat-note">Counted in this browser only — nothing is sent to a server.</p>
+    </section>
+
+    <!-- Socials (rendered from config.js) -->
+    <nav class="socials" id="socials" aria-label="Social links"></nav>
+
+    <!-- Featured links (rendered from config.js) -->
+    <h2 class="section-title">Links</h2>
+    <section class="links" id="links" aria-label="Featured links"></section>
+
+    <!-- Digital store (rendered from config.js) -->
+    <section id="store" aria-label="Digital store">
+      <h2 class="section-title">Digital Store</h2>
+      <div class="store-head">
+        <h2 id="store-heading">Digital Store</h2>
+        <p id="store-subheading"></p>
+      </div>
+      <div class="products" id="products"></div>
+      <p class="secure-note" id="secure-note"></p>
+    </section>
+
+    <footer id="footer"></footer>
+  </main>
+
+  <!-- Demo checkout modal -->
+  <div class="modal-backdrop" id="modal-backdrop" aria-hidden="true" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal">
+      <h2 id="modal-title">Checkout</h2>
+      <p class="modal-product" id="modal-product"></p>
+      <p class="modal-price" id="modal-price"></p>
+      <div class="demo-box" id="modal-note"></div>
+      <div class="modal-actions">
+        <button class="btn btn-ghost" type="button" id="modal-close">Close</button>
+        <button class="btn" type="button" id="modal-gotit">Got it</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <noscript>
+    <p style="text-align:center;padding:20px;font-family:sans-serif">
+      LinkHub needs JavaScript enabled — all links, products and stats are rendered from config.js.
+    </p>
+  </noscript>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
